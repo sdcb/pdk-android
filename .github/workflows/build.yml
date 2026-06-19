@@ -20,18 +20,8 @@ permissions:
 
 jobs:
   build:
-    name: Android release APK (${{ matrix.name }})
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: x64
-            runner: ubuntu-24.04
-            apk: pdk-android-x64.apk
-          - name: arm64
-            runner: ubuntu-24.04
-            apk: pdk-android-arm64.apk
+    name: Android release APK
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout
@@ -41,11 +31,11 @@ jobs:
         run: gradle --no-daemon :app:assembleRelease
 
       - name: Rename release APK
-        run: cp app/build/outputs/apk/release/app-release.apk "${{ matrix.apk }}"
+        run: cp app/build/outputs/apk/release/app-release.apk pdk-android.apk
 
       - name: Upload release APK
         uses: actions/upload-artifact@v7
         with:
-          path: ${{ matrix.apk }}
+          path: pdk-android.apk
           if-no-files-found: error
           archive: false
