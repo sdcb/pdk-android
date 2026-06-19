@@ -59,4 +59,28 @@ class GameStateTest {
         assertFalse(state.passHuman())
         assertEquals("要得起必须出", state.toast)
     }
+
+    @Test
+    fun winnerLeadsNextRoundAfterOpeningRound() {
+        val state = GameState()
+        state.testSetRound(
+            listOf(
+                listOf(c(Rank.Five)),
+                listOf(c(Rank.Seven)),
+                listOf(c(Rank.Nine)),
+            ),
+            PlayerId.Ai2,
+            null,
+            PlayerId.Ai2,
+        )
+
+        state.update(1f)
+        assertTrue(state.roundOver)
+        assertEquals(PlayerId.Ai2, state.lastRoundRecord.winner)
+
+        state.startNewRound("Tester", 20260606u)
+
+        assertEquals(PlayerId.Ai2, state.currentPlayer)
+        assertEquals("AI2 上局获胜先出", state.events.last().message)
+    }
 }

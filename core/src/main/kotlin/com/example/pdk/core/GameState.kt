@@ -110,6 +110,7 @@ class GameState {
     private var aiDelay = 0f
     private var talkCooldown = 0f
     private var nextTurnNo = 1
+    private var nextRoundLeader: PlayerId? = null
     private val random = Random.Default
 
     val isHumanTurn: Boolean get() = currentPlayer == PlayerId.Player && !roundOver
@@ -141,9 +142,15 @@ class GameState {
         talkText = ""
         toast = ""
         nextTurnNo = 1
-        currentPlayer = PaoDeKuaiRules.findFirstPlayerBySpadeThree(hands)
+        val openingPlayer = nextRoundLeader
+        currentPlayer = openingPlayer ?: PaoDeKuaiRules.findFirstPlayerBySpadeThree(hands)
         lastMovePlayer = currentPlayer
-        events += GameEvent(GameEventType.RoundStarted, currentPlayer, "${playerDisplayName(currentPlayer, players[0].name)} 持有黑桃 3 先出")
+        val openingMessage = if (openingPlayer == null) {
+            "${playerDisplayName(currentPlayer, players[0].name)} 持有黑桃 3 先出"
+        } else {
+            "${playerDisplayName(currentPlayer, players[0].name)} 上局获胜先出"
+        }
+        events += GameEvent(GameEventType.RoundStarted, currentPlayer, openingMessage)
     }
 
     private fun newRoundSeed(): UInt {
@@ -601,6 +608,7 @@ class GameState {
             ),
         )
         lastRoundRecord = RoundRecord(winner, score.scores, remaining, score.spring.enabled, bombs.size, score.spring.losers.size)
+        nextRoundLeader = winner
         toast = "${if (winner == PlayerId.Player) "胜利" else "失败"}  本局分: 玩家 ${score.scores[0]} AI1 ${score.scores[1]} AI2 ${score.scores[2]}"
         events += GameEvent(GameEventType.RoundEnded, winner, toast)
     }
