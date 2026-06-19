@@ -1,0 +1,39 @@
+# Gradle / Kotlin build state
+.gradle/
+.kotlin/
+build/
+**/build/
+
+# Local machine configuration
+local.properties
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+
+# Android build outputs
+*.apk
+*.ap_
+*.aab
+*.aar
+*.dex
+*.class
+
+# Signing material
+*.jks
+*.keystore
+
+# Native / external build outputs
+.cxx/
+**/.cxx/
+externalNativeBuild/
+**/externalNativeBuild/
+
+# Logs and OS files
+*.log
+hs_err_pid*
+Thumbs.db
+.DS_Store
+
+# Local screenshots captured during manual testing
+screenshots/
