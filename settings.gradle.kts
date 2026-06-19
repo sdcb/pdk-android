@@ -15,4 +15,5 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "PdkAndroid"
+include(":core")
 include(":app")
