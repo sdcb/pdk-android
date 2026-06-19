@@ -28,10 +28,10 @@ jobs:
         include:
           - name: x64
             runner: ubuntu-24.04
-            artifact: pdk-android-release-x64
+            apk: pdk-android-x64.apk
           - name: arm64
             runner: ubuntu-24.04
-            artifact: pdk-android-release-arm64
+            apk: pdk-android-arm64.apk
 
     steps:
       - name: Checkout
@@ -40,9 +40,12 @@ jobs:
       - name: Build release APK
         run: gradle --no-daemon :app:assembleRelease
 
+      - name: Rename release APK
+        run: cp app/build/outputs/apk/release/app-release.apk "${{ matrix.apk }}"
+
       - name: Upload release APK
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.artifact }}
-          path: app/build/outputs/apk/release/app-release.apk
+          path: ${{ matrix.apk }}
           if-no-files-found: error
+          archive: false
