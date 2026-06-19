@@ -6,7 +6,7 @@
 
 ## 截图
 
-> 截图占位符：发布前补一张真机横屏主游戏截图。
+![](https://github.com/user-attachments/assets/973b5591-48bb-4d63-8cca-ef1ee5a53bd3)
 
 ## 技术栈
 
