@@ -39,3 +39,14 @@ jobs:
           path: pdk-android.apk
           if-no-files-found: error
           archive: false
+
+      - name: Upload APK to MinIO
+        run: |
+          aws s3 cp pdk-android.apk "s3://${{ vars.MINIO_BUCKET }}/2026/pdk-android.apk" \
+            --endpoint-url "${{ secrets.MINIO_HOST }}" \
+            --no-progress
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.MINIO_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.MINIO_SECRET_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+          AWS_EC2_METADATA_DISABLED: "true"
