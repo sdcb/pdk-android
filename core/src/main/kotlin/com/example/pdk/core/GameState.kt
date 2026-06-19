@@ -166,7 +166,7 @@ class GameState {
         }
         aiDelay -= dtSeconds
         if (aiDelay > 0f) return
-        if (currentPlayer != PlayerId.Player && externalAi?.canHandle(currentPlayer) == true && legalMoves(currentPlayer).size > 1) {
+        if (currentPlayer != PlayerId.Player && externalAi?.canHandle(currentPlayer) == true && hasMultipleLocalChoices(currentPlayer)) {
             startExternalAiTurn()
         } else {
             playLocalAiTurn(currentPlayer)
@@ -424,36 +424,16 @@ class GameState {
         return PaoDeKuaiRules.hasAnyFollowMove(players[player.index()].hand, pattern, players[player.index()].hand.size)
     }
 
-    private fun legalMoves(player: PlayerId): List<Pair<List<Card>, HandPattern>> {
-        val hand = players[player.index()].hand
-        val n = hand.size
-        if (n == 0 || n > 20) return emptyList()
-        val moves = mutableListOf<Pair<List<Card>, HandPattern>>()
-        val limit = 1L shl n
-        for (mask in 1L until limit) {
-            val cards = hand.filterIndexed { index, _ -> (mask and (1L shl index)) != 0L }
-            val validation = if (currentPlayerLeads()) {
-                PaoDeKuaiRules.validateLead(cards, n)
-            } else {
-                PaoDeKuaiRules.validateFollow(cards, lastPattern ?: HandPattern(), n)
-            }
-            if (validation.ok) moves += cards to validation.pattern
-        }
-        return moves
-    }
+    private fun hasMultipleLocalChoices(player: PlayerId): Boolean =
+        ai.recommendMoves(players[player.index()].hand, makeAiContext(player), limit = 2).count { !it.pass } > 1
 
     private fun playLocalAiTurn(player: PlayerId) {
-        val legal = legalMoves(player)
-        val source = if (legal.isEmpty() && !currentPlayerLeads()) TurnDecisionSource.System else TurnDecisionSource.LocalAi
-        var reason = if (legal.size == 1) TurnDecisionReason.OnlyLegalMove else TurnDecisionReason.NormalChoice
-        val choice = if (legal.isEmpty() && !currentPlayerLeads()) {
-            reason = TurnDecisionReason.CannotBeat
-            AiMoveChoice(pass = true)
-        } else {
-            ai.chooseMove(players[player.index()].hand, makeAiContext(player)).also {
-                if (it.pass) reason = TurnDecisionReason.CannotBeat
-            }
-        }
+        val choices = ai.recommendMoves(players[player.index()].hand, makeAiContext(player), limit = 2)
+        val legalChoiceCount = choices.count { !it.pass }
+        val source = if (legalChoiceCount == 0 && !currentPlayerLeads()) TurnDecisionSource.System else TurnDecisionSource.LocalAi
+        var reason = if (legalChoiceCount == 1) TurnDecisionReason.OnlyLegalMove else TurnDecisionReason.NormalChoice
+        val choice = choices.firstOrNull() ?: AiMoveChoice(pass = true)
+        if (choice.pass) reason = TurnDecisionReason.CannotBeat
 
         val turnNo = nextTurnNo
         if (choice.pass) {

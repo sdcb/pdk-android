@@ -82,16 +82,17 @@ class BasicAiStrategy {
         if (n == 0 || n > 20) return emptyList()
         val handCounts = countRanks(hand)
         val result = mutableListOf<Candidate>()
-        val limit = 1L shl n
-        for (mask in 1L until limit) {
-            val cards = hand.filterIndexed { index, _ -> (mask and (1L shl index)) != 0L }
+        val seen = mutableSetOf<String>()
+        for (cards in generateCandidateCardLists(hand, context)) {
+            if (!seen.add(candidateCardKey(cards))) continue
             val validation = if (context.leading) {
                 PaoDeKuaiRules.validateLead(cards, n)
             } else {
                 PaoDeKuaiRules.validateFollow(cards, context.previous, n)
             }
             if (!validation.ok) continue
-            val remainder = hand.filterIndexed { index, _ -> (mask and (1L shl index)) == 0L }
+            val played = cards.toSet()
+            val remainder = hand.filter { it !in played }
             val disruption = groupDisruptionPenalty(handCounts, cards, validation.pattern)
             val leaves = remainder.size
             var score = patternBaseScore(validation.pattern.type)
@@ -106,6 +107,207 @@ class BasicAiStrategy {
         }
         return result
     }
+
+    private data class HandView(
+        val cards: List<Card>,
+        val byRank: Map<Rank, List<Card>>,
+        val ranks: List<Rank>,
+    ) {
+        fun take(rank: Rank, count: Int): List<Card> = byRank[rank]?.take(count).orEmpty()
+        fun count(rank: Rank): Int = byRank[rank]?.size ?: 0
+    }
+
+    private fun handView(hand: List<Card>): HandView {
+        val byRank = hand.sortedByGameOrder().groupBy { it.rank }.toSortedMap(compareBy { it.value })
+        return HandView(hand.sortedByGameOrder(), byRank, byRank.keys.toList())
+    }
+
+    private fun generateCandidateCardLists(hand: List<Card>, context: AiContext): List<List<Card>> {
+        val view = handView(hand)
+        return if (context.leading) {
+            generateLeadCardLists(view, hand.size)
+        } else {
+            generateFollowCardLists(view, hand.size, context.previous)
+        }
+    }
+
+    private fun generateLeadCardLists(view: HandView, handSize: Int): List<List<Card>> = buildList {
+        addSingles(view)
+        addPairs(view)
+        addStraights(view, minLength = 5)
+        addConsecutivePairs(view, minGroups = 2)
+        addTripleWithPair(view, minRank = null)
+        addFinalShortTriples(view, handSize, minRank = null)
+        addPlanes(view, handSize, expectedGroups = null, minRank = null)
+        addBombs(view, minRank = null)
+    }
+
+    private fun generateFollowCardLists(view: HandView, handSize: Int, previous: HandPattern): List<List<Card>> = buildList {
+        when (previous.type) {
+            PatternType.Single -> addSingles(view, previous.mainRank)
+            PatternType.Pair -> addPairs(view, previous.mainRank)
+            PatternType.Straight -> addStraights(view, minLength = previous.cardCount, maxLength = previous.cardCount, minRank = previous.mainRank)
+            PatternType.ConsecutivePairs -> addConsecutivePairs(
+                view,
+                minGroups = previous.cardCount / 2,
+                maxGroups = previous.cardCount / 2,
+                minRank = previous.mainRank,
+            )
+            PatternType.TripleWithPair -> addTripleWithPair(view, previous.mainRank)
+            PatternType.TripleWithOne -> addFinalShortTriples(view, handSize, previous.mainRank)
+            PatternType.Plane -> addPlanes(view, handSize, expectedGroups = previous.groupCount, minRank = previous.mainRank)
+            PatternType.Bomb -> addBombs(view, previous.mainRank)
+            PatternType.Invalid -> Unit
+        }
+        if (previous.type != PatternType.Bomb) addBombs(view, minRank = null)
+    }
+
+    private fun MutableList<List<Card>>.addSingles(view: HandView, minRank: Rank? = null) {
+        for (rank in view.ranks) {
+            if (minRank != null && rank.value <= minRank.value) continue
+            add(view.take(rank, 1))
+        }
+    }
+
+    private fun MutableList<List<Card>>.addPairs(view: HandView, minRank: Rank? = null) {
+        for (rank in view.ranks) {
+            if (view.count(rank) < 2) continue
+            if (minRank != null && rank.value <= minRank.value) continue
+            add(view.take(rank, 2))
+        }
+    }
+
+    private fun MutableList<List<Card>>.addBombs(view: HandView, minRank: Rank? = null) {
+        for (rank in view.ranks) {
+            if (rank == Rank.Ace || rank == Rank.Two || view.count(rank) < 4) continue
+            if (minRank != null && rank.value <= minRank.value) continue
+            add(view.take(rank, 4))
+        }
+    }
+
+    private fun MutableList<List<Card>>.addTripleWithPair(view: HandView, minRank: Rank? = null) {
+        val triples = view.ranks.filter { view.count(it) >= 3 && (minRank == null || it.value > minRank.value) }
+        val pairs = view.ranks.filter { view.count(it) >= 2 }
+        for (triple in triples) {
+            for (pair in pairs) {
+                if (pair == triple) continue
+                add(view.take(triple, 3) + view.take(pair, 2))
+            }
+        }
+    }
+
+    private fun MutableList<List<Card>>.addFinalShortTriples(view: HandView, handSize: Int, minRank: Rank? = null) {
+        if (handSize !in 3..4) return
+        for (rank in view.ranks) {
+            if (view.count(rank) < 3) continue
+            if (minRank != null && rank.value <= minRank.value) continue
+            val core = view.take(rank, 3)
+            if (handSize == 3) {
+                add(core)
+            } else {
+                for (kicker in view.cards.filter { it !in core }) {
+                    add(core + kicker)
+                }
+            }
+        }
+    }
+
+    private fun MutableList<List<Card>>.addStraights(
+        view: HandView,
+        minLength: Int,
+        maxLength: Int = Int.MAX_VALUE,
+        minRank: Rank? = null,
+    ) {
+        val available = view.ranks.filter { it != Rank.Two && view.count(it) >= 1 }
+        for (run in consecutiveRuns(available, minLength, maxLength)) {
+            if (minRank != null && run.last().value <= minRank.value) continue
+            add(run.flatMap { view.take(it, 1) })
+        }
+    }
+
+    private fun MutableList<List<Card>>.addConsecutivePairs(
+        view: HandView,
+        minGroups: Int,
+        maxGroups: Int = Int.MAX_VALUE,
+        minRank: Rank? = null,
+    ) {
+        val available = view.ranks.filter { it != Rank.Two && view.count(it) >= 2 }
+        for (run in consecutiveRuns(available, minGroups, maxGroups)) {
+            if (minRank != null && run.last().value <= minRank.value) continue
+            add(run.flatMap { view.take(it, 2) })
+        }
+    }
+
+    private fun MutableList<List<Card>>.addPlanes(
+        view: HandView,
+        handSize: Int,
+        expectedGroups: Int?,
+        minRank: Rank?,
+    ) {
+        val available = view.ranks.filter { it != Rank.Two && view.count(it) >= 3 }
+        val minGroups = expectedGroups ?: 2
+        val maxGroups = expectedGroups ?: Int.MAX_VALUE
+        for (run in consecutiveRuns(available, minGroups, maxGroups)) {
+            if (minRank != null && run.last().value <= minRank.value) continue
+            val core = run.flatMap { view.take(it, 3) }
+            val remaining = view.cards.filter { it !in core }
+            val groups = run.size
+            val maxKickers = minOf(groups * 2, remaining.size)
+            for (kickerCount in 0..maxKickers) {
+                if (kickerCount < groups && core.size + kickerCount != handSize) continue
+                combinations(remaining, kickerCount) { kickers ->
+                    add(core + kickers)
+                }
+            }
+        }
+    }
+
+    private fun consecutiveRuns(ranks: List<Rank>, minLength: Int, maxLength: Int): List<List<Rank>> {
+        if (minLength <= 0 || ranks.size < minLength) return emptyList()
+        val result = mutableListOf<List<Rank>>()
+        val sorted = ranks.sortedBy { it.value }
+        for (start in sorted.indices) {
+            val run = mutableListOf(sorted[start])
+            for (end in start until sorted.size) {
+                if (end > start) {
+                    val previous = sorted[end - 1]
+                    val current = sorted[end]
+                    if (current.value != previous.value + 1) break
+                    run += current
+                }
+                if (run.size >= minLength) {
+                    if (run.size > maxLength) break
+                    result += run.toList()
+                }
+            }
+        }
+        return result
+    }
+
+    private fun <T> combinations(items: List<T>, choose: Int, consume: (List<T>) -> Unit) {
+        if (choose < 0 || choose > items.size) return
+        if (choose == 0) {
+            consume(emptyList())
+            return
+        }
+        val selected = ArrayList<T>(choose)
+        fun visit(start: Int, remaining: Int) {
+            if (remaining == 0) {
+                consume(selected.toList())
+                return
+            }
+            val lastStart = items.size - remaining
+            for (index in start..lastStart) {
+                selected += items[index]
+                visit(index + 1, remaining - 1)
+                selected.removeAt(selected.lastIndex)
+            }
+        }
+        visit(0, choose)
+    }
+
+    private fun candidateCardKey(cards: List<Card>): String =
+        cards.sortedByGameOrder().joinToString("|") { it.id }
 
     private fun patternBaseScore(type: PatternType): Int = when (type) {
         PatternType.Straight -> 800

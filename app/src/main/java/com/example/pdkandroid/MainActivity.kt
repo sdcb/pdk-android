@@ -1711,7 +1711,7 @@ private fun DrawScope.drawPlayedCards(
         PlayerId.Ai2 -> Offset(table.right - 250f, table.top + 96f)
         PlayerId.Player -> Offset(layoutWidth / 2f, table.bottom - 46f)
     }
-    val t = 1f - visuals.playAnimation
+    val t = easeInOutWithLinearMiddle(1f - visuals.playAnimation)
     val scale = if (visuals.playAnimation > 0f) lerp(0.35f, 1f, t) else 1f
     cards.forEachIndexed { index, card ->
         val finalTopLeft = Offset(start.x + index * step, start.y)
@@ -1739,12 +1739,12 @@ private fun DrawScope.animatedCardTopLeft(
     layoutWidth: Float,
 ): Offset {
     if (!visuals.handsSorted) {
-        val t = easeOutCubic(dealProgress(index, visuals.dealElapsed))
+        val t = easeInOutWithLinearMiddle(dealProgress(index, visuals.dealElapsed))
         val source = Offset(layoutWidth / 2f - cardWidth / 2f, CanvasHeight / 2f - cardHeight / 2f)
         return Offset(lerp(source.x, finalTopLeft.x, t), lerp(source.y, finalTopLeft.y, t))
     }
     if (visuals.sortAnimation > 0f) {
-        val t = easeOutCubic(1f - visuals.sortAnimation)
+        val t = easeInOutWithLinearMiddle(1f - visuals.sortAnimation)
         return Offset(lerp(oldTopLeft.x, finalTopLeft.x, t), lerp(oldTopLeft.y, finalTopLeft.y, t))
     }
     return finalTopLeft
@@ -1778,9 +1778,18 @@ private fun bombShakeOffset(visuals: GameVisuals): Offset {
 
 private fun lerp(from: Float, to: Float, t: Float): Float = from + (to - from) * t.coerceIn(0f, 1f)
 
-private fun easeOutCubic(t: Float): Float {
-    val p = 1f - t.coerceIn(0f, 1f)
-    return 1f - p * p * p
+private fun easeInOutWithLinearMiddle(t: Float, edge: Float = 0.2f): Float {
+    val p = t.coerceIn(0f, 1f)
+    val e = edge.coerceIn(0.001f, 0.499f)
+    val velocity = 1f / (1f - e)
+    return when {
+        p < e -> velocity * p * p / (2f * e)
+        p > 1f - e -> {
+            val q = 1f - p
+            1f - velocity * q * q / (2f * e)
+        }
+        else -> velocity * (p - e / 2f)
+    }
 }
 
 private fun DrawScope.drawAtlasCard(atlas: ImageBitmap, card: Card?, topLeft: Offset, width: Float, height: Float) {

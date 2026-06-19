@@ -159,15 +159,70 @@ object PaoDeKuaiRules {
 
     fun hasAnyFollowMove(hand: List<Card>, previous: HandPattern, handSizeBeforePlay: Int = -1): Boolean {
         if (!previous.isValid || hand.isEmpty()) return false
-        val n = hand.size
-        if (n >= 63) return false
-        val sourceHandSize = if (handSizeBeforePlay >= 0) handSizeBeforePlay else n
-        val limit = 1L shl n
-        for (mask in 1L until limit) {
-            val cards = hand.filterIndexed { index, _ -> (mask and (1L shl index)) != 0L }
-            if (validateFollow(cards, previous, sourceHandSize).ok) return true
+        val counts = hand.groupingBy { it.rank }.eachCount()
+        fun hasBombAbove(rank: Rank?): Boolean =
+            counts.any { (candidateRank, count) ->
+                count >= 4 &&
+                    candidateRank != Rank.Ace &&
+                    candidateRank != Rank.Two &&
+                    (rank == null || candidateRank.value > rank.value)
+            }
+
+        if (previous.type == PatternType.Bomb) return hasBombAbove(previous.mainRank)
+        if (hasBombAbove(null)) return true
+
+        fun hasRankCountAbove(requiredCount: Int): Boolean =
+            counts.any { (rank, count) -> count >= requiredCount && rank.value > previous.mainRank.value }
+
+        fun hasConsecutiveRun(requiredCount: Int, groups: Int): Boolean {
+            val ranks = counts
+                .filter { (rank, count) -> rank != Rank.Two && count >= requiredCount }
+                .keys
+                .sortedBy { it.value }
+            if (ranks.size < groups) return false
+            for (start in 0..ranks.size - groups) {
+                val run = ranks.subList(start, start + groups)
+                if (run.zipWithNext().all { (a, b) -> b.value == a.value + 1 } &&
+                    run.last().value > previous.mainRank.value
+                ) {
+                    return true
+                }
+            }
+            return false
         }
-        return false
+
+        return when (previous.type) {
+            PatternType.Single -> hasRankCountAbove(1)
+            PatternType.Pair -> hasRankCountAbove(2)
+            PatternType.Straight -> hasConsecutiveRun(1, previous.cardCount)
+            PatternType.ConsecutivePairs -> hasConsecutiveRun(2, previous.cardCount / 2)
+            PatternType.TripleWithPair -> {
+                val pairRanks = counts.filterValues { it >= 2 }.keys
+                counts.any { (rank, count) ->
+                    count >= 3 && rank.value > previous.mainRank.value && pairRanks.any { it != rank }
+                }
+            }
+            PatternType.Plane -> {
+                val groups = previous.groupCount
+                if (groups < 2) return false
+                val tripleRanks = counts
+                    .filter { (rank, count) -> rank != Rank.Two && count >= 3 }
+                    .keys
+                    .sortedBy { it.value }
+                for (start in 0..tripleRanks.size - groups) {
+                    val run = tripleRanks.subList(start, start + groups)
+                    if (run.zipWithNext().any { (a, b) -> b.value != a.value + 1 }) continue
+                    if (run.last().value <= previous.mainRank.value) continue
+                    val coreCards = groups * 3
+                    val remaining = hand.size - coreCards
+                    if (remaining >= groups) return true
+                }
+                false
+            }
+            PatternType.TripleWithOne,
+            PatternType.Invalid,
+            -> false
+        }
     }
 
     fun patternDescription(pattern: HandPattern): String {
