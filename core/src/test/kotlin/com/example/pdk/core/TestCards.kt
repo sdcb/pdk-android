@@ -1,6 +1,12 @@
 package com.example.pdk.core
 
 fun c(rank: Rank, suit: Suit = Suit.Spades): Card = Card(rank, suit)
+fun cardsOf(rank: Rank, count: Int): List<Card> = Suit.entries.take(count).map { Card(rank, it) }
+fun straightCards(from: Rank, count: Int, suit: Suit = Suit.Spades): List<Card> {
+    val start = Rank.entries.indexOf(from)
+    return Rank.entries.drop(start).take(count).map { Card(it, suit) }
+}
+
 fun countRank(cards: List<Card>, rank: Rank): Int = cards.count { it.rank == rank }
 
 fun leadContext(handSize: Int, nextRemaining: Int = 10, minOpponentRemaining: Int = 10): AiContext =

@@ -77,6 +77,24 @@ private data class LocalAiResult(
     val leading: Boolean,
 )
 
+private enum class TalkKind {
+    NormalPlay,
+    Pass,
+    BombPlay,
+    AlmostOut,
+    ForcedBreakGoodHand,
+    CannotBeatBigMove,
+    BigMoveTaunt,
+    HumanGoodBomb,
+    HumanGoodStraight,
+    HumanGoodPlane,
+    HumanGoodConsecutivePairs,
+    RoundEndGoodStraight,
+    RoundEndGoodPlane,
+    RoundEndGoodBomb,
+    RoundEndGoodConsecutivePairs,
+}
+
 class GameState {
     val players: List<PlayerState> = listOf(
         PlayerState("李姐"),
@@ -129,6 +147,7 @@ class GameState {
     private var talkCooldown = 0f
     private var nextTurnNo = 1
     private var nextRoundLeader: PlayerId? = null
+    private val lastTalkIndices = IntArray(TalkKind.entries.size) { -1 }
     private val random = Random.Default
 
     val isHumanTurn: Boolean get() = currentPlayer == PlayerId.Player && !roundOver
@@ -519,7 +538,7 @@ class GameState {
                 nextTurnNo++
             }
         } else {
-            playCards(player, choice.cards, choice.pattern)
+            playCards(player, choice.cards, choice.pattern, choice.disruptionPenalty)
             turnRecords += TurnRecord(
                 turnNo,
                 player,
@@ -596,7 +615,7 @@ class GameState {
 
         val turnNo = nextTurnNo
         playCards(actor, cards, validation.pattern)
-        if (result.requestedAction.talk.isNotBlank()) maybeTalk(actor, result.requestedAction.talk)
+        if (result.requestedAction.talk.isNotBlank()) showTalk(actor, result.requestedAction.talk, force = true)
         turnRecords += TurnRecord(turnNo, actor, TurnDecisionSource.LlmAi, TurnDecisionReason.NormalChoice, result.requestedAction, cards, validation.pattern, true, trace)
         nextTurnNo++
         return true
@@ -609,7 +628,7 @@ class GameState {
             if (!pass(actor)) return false
             turnRecords += TurnRecord(turnNo, actor, TurnDecisionSource.LlmAi, TurnDecisionReason.LlmFallback, requested, emptyList(), null, false, trace.copy(errorMessage = message))
         } else {
-            playCards(actor, choice.cards, choice.pattern)
+            playCards(actor, choice.cards, choice.pattern, choice.disruptionPenalty)
             turnRecords += TurnRecord(turnNo, actor, TurnDecisionSource.LlmAi, TurnDecisionReason.LlmFallback, requested, choice.cards, choice.pattern, false, trace.copy(errorMessage = message))
         }
         nextTurnNo++
@@ -624,8 +643,9 @@ class GameState {
         localAiResult.set(null)
     }
 
-    private fun playCards(player: PlayerId, cards: List<Card>, pattern: HandPattern) {
-        if (currentPlayerLeads()) trickLeader = player
+    private fun playCards(player: PlayerId, cards: List<Card>, pattern: HandPattern, disruptionPenalty: Int = 0) {
+        val wasFollowing = !currentPlayerLeads()
+        if (!wasFollowing) trickLeader = player
         removeCardsFromHand(player, cards)
         players[player.index()].hasPlayedCards = true
         playedCards += cards
@@ -639,7 +659,19 @@ class GameState {
             bombs += BombScoreEvent(player, 20)
             events += GameEvent(GameEventType.Bomb, player, "炸弹 +20", cards)
         }
-        if (player != PlayerId.Player) maybeTalk(player, if (pattern.type == PatternType.Bomb) "炸一下，醒醒神！" else "轮到我了，看我走一手。")
+        if (player == PlayerId.Player) {
+            maybeTalkAboutHumanMove(pattern)
+        } else if (pattern.type == PatternType.Bomb) {
+            maybeTalk(player, TalkKind.BombPlay, force = true)
+        } else if (wasFollowing && disruptionPenalty >= 320) {
+            maybeTalk(player, TalkKind.ForcedBreakGoodHand, force = true)
+        } else if (pattern.cardCount >= 7) {
+            maybeTalk(player, TalkKind.BigMoveTaunt, force = true)
+        } else if (players[player.index()].hand.size <= 3) {
+            maybeTalk(player, TalkKind.AlmostOut)
+        } else {
+            maybeTalk(player, TalkKind.NormalPlay)
+        }
         if (players[player.index()].hand.isEmpty()) {
             finishRound(player)
         } else {
@@ -662,7 +694,13 @@ class GameState {
         lastPattern?.let { recordPassObservation(player, it) }
         toast = "${playerDisplayName(player, players[0].name)} 不要"
         events += GameEvent(GameEventType.Passed, player, toast)
-        if (player != PlayerId.Player) maybeTalk(player, "先不要，你们继续。")
+        if (player != PlayerId.Player) {
+            if (lastPattern?.cardCount ?: 0 >= 7) {
+                maybeTalk(player, TalkKind.CannotBeatBigMove, force = true)
+            } else {
+                maybeTalk(player, TalkKind.Pass)
+            }
+        }
         if (passCount >= 2) {
             currentPlayer = lastMovePlayer
             lastPattern = null
@@ -691,6 +729,7 @@ class GameState {
         nextRoundLeader = winner
         toast = "${if (winner == PlayerId.Player) "胜利" else "失败"}  本局分: 玩家 ${score.scores[0]} AI1 ${score.scores[1]} AI2 ${score.scores[2]}"
         events += GameEvent(GameEventType.RoundEnded, winner, toast)
+        maybeTalkAboutRoundEndGoodHands(winner)
     }
 
     private fun removeCardsFromHand(player: PlayerId, cards: List<Card>) {
@@ -728,11 +767,199 @@ class GameState {
         if (currentPlayer == PlayerId.Player) events += GameEvent(GameEventType.Talk, PlayerId.Player, "轮到你")
     }
 
-    private fun maybeTalk(player: PlayerId, text: String) {
-        if (talkCooldown > 0f && random.nextBoolean()) return
+    private fun maybeTalk(player: PlayerId, kind: TalkKind, force: Boolean = false) {
+        if (player == PlayerId.Player || (!force && !isForceTalk(kind) && talkCooldown > 0f)) return
+        val text = chooseTalkText(kind)
+        if (text.isBlank()) return
+        showTalk(player, text, force = true)
+    }
+
+    private fun maybeTalkAboutHumanMove(pattern: HandPattern) {
+        val kind = humanGoodTalkKind(pattern) ?: return
+        val speaker = if (random.nextBoolean()) PlayerId.Ai1 else PlayerId.Ai2
+        maybeTalk(speaker, kind, force = true)
+    }
+
+    private fun maybeTalkAboutRoundEndGoodHands(winner: PlayerId) {
+        data class Candidate(val player: PlayerId, val kind: TalkKind, val priority: Int)
+
+        val best = listOf(PlayerId.Ai1, PlayerId.Ai2)
+            .filter { it != winner }
+            .mapNotNull { player ->
+                val kind = roundEndGoodTalkKind(players[player.index()].hand) ?: return@mapNotNull null
+                val priority = when (kind) {
+                    TalkKind.RoundEndGoodPlane -> 400
+                    TalkKind.RoundEndGoodStraight -> 300
+                    TalkKind.RoundEndGoodBomb -> 200
+                    TalkKind.RoundEndGoodConsecutivePairs -> 100
+                    else -> 0
+                }
+                Candidate(player, kind, priority)
+            }
+            .maxByOrNull { it.priority }
+        if (best != null) maybeTalk(best.player, best.kind, force = true)
+    }
+
+    private fun chooseTalkText(kind: TalkKind): String {
+        val pool = talkPool(kind, players[0].name)
+        if (pool.isEmpty()) return ""
+        val kindIndex = kind.ordinal
+        var selected = random.nextInt(pool.size)
+        if (pool.size > 1 && selected == lastTalkIndices[kindIndex]) {
+            selected = (selected + 1) % pool.size
+        }
+        lastTalkIndices[kindIndex] = selected
+        return pool[selected]
+    }
+
+    private fun showTalk(player: PlayerId, text: String, force: Boolean = false) {
+        if (player == PlayerId.Player || (!force && talkCooldown > 0f)) return
         talkPlayer = player
         talkText = text
         talkCooldown = 5f
         events += GameEvent(GameEventType.Talk, player, text)
     }
+}
+
+private fun isForceTalk(kind: TalkKind): Boolean = when (kind) {
+    TalkKind.BombPlay,
+    TalkKind.ForcedBreakGoodHand,
+    TalkKind.CannotBeatBigMove,
+    TalkKind.BigMoveTaunt,
+    TalkKind.HumanGoodBomb,
+    TalkKind.HumanGoodStraight,
+    TalkKind.HumanGoodPlane,
+    TalkKind.HumanGoodConsecutivePairs,
+    TalkKind.RoundEndGoodStraight,
+    TalkKind.RoundEndGoodPlane,
+    TalkKind.RoundEndGoodBomb,
+    TalkKind.RoundEndGoodConsecutivePairs,
+    -> true
+    TalkKind.NormalPlay,
+    TalkKind.Pass,
+    TalkKind.AlmostOut,
+    -> false
+}
+
+private fun talkPool(kind: TalkKind, humanName: String): List<String> {
+    val player = humanName.ifBlank { "李姐" }
+    val pool = when (kind) {
+        TalkKind.NormalPlay -> listOf(
+            "这牌我忍半天了！",
+            "轮到我了，看我走一手。",
+            "别眨眼，我这手有点讲究。",
+        )
+        TalkKind.Pass -> listOf(
+            "先不要，你们继续。",
+            "这手我让一让。",
+            "过了过了，别看我。",
+        )
+        TalkKind.BombPlay -> listOf(
+            "看，我有炸弹，没想到吧？",
+            "炸一下，醒醒神！",
+            "这炸弹我可憋很久了。",
+        )
+        TalkKind.AlmostOut -> listOf(
+            "别急别急，我马上跑完。",
+            "我手里没几张了，注意点。",
+            "再给我一轮，我可能就溜了。",
+        )
+        TalkKind.ForcedBreakGoodHand -> listOf(
+            "哎呀，我的好牌都被拆光光了。",
+            "这牌本来很顺的，非得拆我一手。",
+            "要得起必须打，心疼我的牌型。",
+        )
+        TalkKind.CannotBeatBigMove -> listOf(
+            "这么长一串？我先缓缓。",
+            "这谁顶得住啊，我不要了。",
+            "你这一下甩这么多，我接不住。",
+        )
+        TalkKind.BigMoveTaunt -> listOf(
+            "看好了，一大把直接甩出去！",
+            "这么多牌一起走，帅不帅？",
+            "我这一手下去，桌面都清爽了。",
+        )
+        TalkKind.HumanGoodBomb -> listOf(
+            "$player 手里还有炸弹？这谁敢动啊。",
+            "完了完了，$player 藏着炸弹呢。",
+            "这炸弹一亮，我有点慌。",
+        )
+        TalkKind.HumanGoodStraight -> listOf(
+            "这顺子也太顺了吧。",
+            "$player 这条顺子，漂亮得有点过分。",
+            "这么长一串，看得我心里发虚。",
+        )
+        TalkKind.HumanGoodPlane -> listOf(
+            "飞机都来了？这牌也太豪华了。",
+            "这飞机一起飞，我可拦不住。",
+            "$player 这飞机藏得真深。",
+        )
+        TalkKind.HumanGoodConsecutivePairs -> listOf(
+            "这一排对子也太整齐了。",
+            "连对这么长，我有点接不住。",
+            "对子排队过来，压力很大。",
+        )
+        TalkKind.RoundEndGoodStraight -> listOf(
+            "哎呀，我还有一条好顺子呢。",
+            "这顺子还没来得及跑出去。",
+            "可惜了，我手里这顺子挺漂亮。",
+        )
+        TalkKind.RoundEndGoodPlane -> listOf(
+            "哎呀，我还有个好飞机呢。",
+            "飞机还在手里，结果已经结束了。",
+            "这把我的飞机没起飞。",
+        )
+        TalkKind.RoundEndGoodBomb -> listOf(
+            "我炸弹还在手里呢，亏大了。",
+            "这炸弹没甩出去，太憋屈了。",
+            "早知道我就先炸一下了。",
+        )
+        TalkKind.RoundEndGoodConsecutivePairs -> listOf(
+            "我这连对还挺整齐，可惜没机会了。",
+            "对子排好了，牌局却结束了。",
+            "这手连对没打出去，真难受。",
+        )
+    }
+    return pool
+}
+
+private fun humanGoodTalkKind(pattern: HandPattern): TalkKind? = when {
+    pattern.type == PatternType.Bomb -> TalkKind.HumanGoodBomb
+    pattern.type == PatternType.Plane -> TalkKind.HumanGoodPlane
+    pattern.type == PatternType.Straight && pattern.cardCount >= 7 -> TalkKind.HumanGoodStraight
+    pattern.type == PatternType.ConsecutivePairs && pattern.cardCount >= 6 -> TalkKind.HumanGoodConsecutivePairs
+    else -> null
+}
+
+private fun roundEndGoodTalkKind(hand: List<Card>): TalkKind? {
+    val counts = hand.groupingBy { it.rank }.eachCount()
+    val tripleRanks = mutableListOf<Rank>()
+    val straightRanks = mutableListOf<Rank>()
+    val pairRanks = mutableListOf<Rank>()
+    var hasBomb = false
+    counts.forEach { (rank, count) ->
+        if (rank != Rank.Two) straightRanks += rank
+        if (rank != Rank.Two && count >= 2) pairRanks += rank
+        if (rank != Rank.Two && count >= 3) tripleRanks += rank
+        if (count >= 4 && rank != Rank.Ace && rank != Rank.Two) hasBomb = true
+    }
+    return when {
+        bestConsecutiveRunLength(tripleRanks) >= 2 -> TalkKind.RoundEndGoodPlane
+        bestConsecutiveRunLength(straightRanks) >= 7 -> TalkKind.RoundEndGoodStraight
+        hasBomb -> TalkKind.RoundEndGoodBomb
+        bestConsecutiveRunLength(pairRanks) >= 3 -> TalkKind.RoundEndGoodConsecutivePairs
+        else -> null
+    }
+}
+
+private fun bestConsecutiveRunLength(ranks: List<Rank>): Int {
+    if (ranks.isEmpty()) return 0
+    val sorted = ranks.distinct().sortedBy { it.value }
+    var best = 1
+    var current = 1
+    sorted.zipWithNext().forEach { (left, right) ->
+        current = if (right.value == left.value + 1) current + 1 else 1
+        best = maxOf(best, current)
+    }
+    return best
 }
