@@ -1,5 +1,6 @@
 package com.example.pdk.core
 
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.random.Random
 
 data class PlayerState(
@@ -68,6 +69,14 @@ data class RoundRecord(
     val springLosers: Int = 0,
 )
 
+private data class LocalAiResult(
+    val generation: Int,
+    val player: PlayerId,
+    val turnNo: Int,
+    val choices: List<AiMoveChoice>,
+    val leading: Boolean,
+)
+
 class GameState {
     val players: List<PlayerState> = listOf(
         PlayerState("李姐"),
@@ -102,11 +111,20 @@ class GameState {
     var lastRoundRecord: RoundRecord = RoundRecord()
         private set
 
-    private val ai = BasicAiStrategy()
+    private val basicAi = BasicAiStrategy()
+    private val strongAi = StrongAiStrategy()
+    private val localAiKinds: MutableList<LocalAiKind> = MutableList(3) { LocalAiKind.Basic }
+    private val passHistory: MutableList<MutableList<PassObservation>> = MutableList(3) { mutableListOf() }
     private var externalAi: ExternalAiController? = null
     private var externalAiPending = false
+    private var localAiPending = false
+    private var localAiGeneration = 0
+    private var localAiWorker: Thread? = null
+    private val localAiResult = AtomicReference<LocalAiResult?>(null)
     private val bombs = mutableListOf<BombScoreEvent>()
     private var passCount = 0
+    private var trickLeader: PlayerId = PlayerId.Player
+    private var roundLeader: PlayerId = PlayerId.Player
     private var aiDelay = 0f
     private var talkCooldown = 0f
     private var nextTurnNo = 1
@@ -131,6 +149,8 @@ class GameState {
         turnRecords.clear()
         playedCards.clear()
         passObservations.fill(null)
+        passHistory.forEach { it.clear() }
+        cancelLocalAi()
         bombs.clear()
         lastCards = emptyList()
         lastPattern = null
@@ -145,6 +165,8 @@ class GameState {
         val openingPlayer = nextRoundLeader
         currentPlayer = openingPlayer ?: PaoDeKuaiRules.findFirstPlayerBySpadeThree(hands)
         lastMovePlayer = currentPlayer
+        trickLeader = currentPlayer
+        roundLeader = currentPlayer
         val openingMessage = if (openingPlayer == null) {
             "${playerDisplayName(currentPlayer, players[0].name)} 持有黑桃 3 先出"
         } else {
@@ -167,24 +189,49 @@ class GameState {
             val result = externalAi?.tryGetResult()
             if (result == null) return
             externalAiPending = false
-            if (!applyExternalAiResult(result)) playLocalAiTurn(currentPlayer)
+            if (!applyExternalAiResult(result)) startLocalAiTurn(currentPlayer)
             aiDelay = 0.55f
+            return
+        }
+        if (localAiPending) {
+            val result = localAiResult.getAndSet(null) ?: return
+            localAiPending = false
+            localAiWorker = null
+            if (result.generation != localAiGeneration ||
+                result.player != currentPlayer ||
+                result.turnNo != nextTurnNo
+            ) {
+                return
+            }
+            if (result.player != PlayerId.Player &&
+                externalAi?.canHandle(result.player) == true &&
+                result.choices.count { !it.pass } > 1
+            ) {
+                startExternalAiTurn()
+            } else {
+                applyLocalAiChoices(result.player, result.turnNo, result.choices, result.leading)
+            }
+            aiDelay = if (currentPlayer == PlayerId.Player) 0.25f else 0.55f
             return
         }
         aiDelay -= dtSeconds
         if (aiDelay > 0f) return
-        if (currentPlayer != PlayerId.Player && externalAi?.canHandle(currentPlayer) == true && hasMultipleLocalChoices(currentPlayer)) {
-            startExternalAiTurn()
-        } else {
-            playLocalAiTurn(currentPlayer)
-        }
-        aiDelay = if (currentPlayer == PlayerId.Player) 0.25f else 0.55f
+        startLocalAiTurn(currentPlayer)
     }
 
     fun setExternalAiController(controller: ExternalAiController?) {
         externalAi?.cancel()
         externalAi = controller
         externalAiPending = false
+    }
+
+    fun setLocalAiKind(player: PlayerId, kind: LocalAiKind) {
+        cancelLocalAi()
+        localAiKinds[player.index()] = kind
+    }
+
+    fun setLocalAiKind(player: PlayerId, name: String) {
+        setLocalAiKind(player, localAiKindFromName(name))
     }
 
     fun toggleAutoplay() {
@@ -238,7 +285,7 @@ class GameState {
 
     fun applyHint(): Boolean {
         if (!isHumanTurn) return false
-        val choice = ai.chooseMove(players[0].hand, makeAiContext(PlayerId.Player))
+        val choice = chooseLocalMove(PlayerId.Player)
         if (choice.pass) {
             toast = "没有可出的牌"
             events += GameEvent(GameEventType.Hint, PlayerId.Player, toast)
@@ -363,8 +410,13 @@ class GameState {
         }
         this.currentPlayer = currentPlayer
         this.lastMovePlayer = lastMovePlayer
+        this.trickLeader = if (previousPattern == null) currentPlayer else lastMovePlayer
+        this.roundLeader = currentPlayer
         this.lastPattern = previousPattern
         this.lastCards = emptyList()
+        playedCards.clear()
+        passObservations.fill(null)
+        passHistory.forEach { it.clear() }
         roundOver = false
         passCount = 0
         selectedIndices.clear()
@@ -418,11 +470,16 @@ class GameState {
             previous = lastPattern ?: HandPattern(),
             ownRemainingCards = remaining[playerIndex],
             currentPlayerIndex = playerIndex,
+            lastMovePlayerIndex = lastMovePlayer.index(),
+            trickLeaderIndex = if (currentPlayerLeads()) currentPlayer.index() else trickLeader.index(),
+            roundLeaderIndex = roundLeader.index(),
+            currentTrickPassCount = passCount,
             nextPlayerRemainingCards = remaining[next],
             minOpponentRemainingCards = opponents.filter { it > 0 }.minOrNull() ?: 0,
             remainingCards = remaining,
             playedCards = playedCards,
             passObservations = passObservations.toList(),
+            passHistory = passHistory.map { it.toList() },
         )
     }
 
@@ -431,18 +488,31 @@ class GameState {
         return PaoDeKuaiRules.hasAnyFollowMove(players[player.index()].hand, pattern, players[player.index()].hand.size)
     }
 
-    private fun hasMultipleLocalChoices(player: PlayerId): Boolean =
-        ai.recommendMoves(players[player.index()].hand, makeAiContext(player), limit = 2).count { !it.pass } > 1
+    private fun startLocalAiTurn(player: PlayerId) {
+        cancelLocalAi()
+        val generation = ++localAiGeneration
+        val turnNo = nextTurnNo
+        val hand = players[player.index()].hand.toList()
+        val context = makeAiContext(player)
+        val kind = localAiKinds[player.index()]
+        localAiPending = true
+        localAiWorker = Thread {
+            val choices = recommendLocalMoves(kind, hand, context, limit = 2)
+            localAiResult.set(LocalAiResult(generation, player, turnNo, choices, context.leading))
+        }.also { thread ->
+            thread.isDaemon = true
+            thread.name = "PdkLocalAi"
+            thread.start()
+        }
+    }
 
-    private fun playLocalAiTurn(player: PlayerId) {
-        val choices = ai.recommendMoves(players[player.index()].hand, makeAiContext(player), limit = 2)
+    private fun applyLocalAiChoices(player: PlayerId, turnNo: Int, choices: List<AiMoveChoice>, leading: Boolean) {
         val legalChoiceCount = choices.count { !it.pass }
-        val source = if (legalChoiceCount == 0 && !currentPlayerLeads()) TurnDecisionSource.System else TurnDecisionSource.LocalAi
+        val source = if (legalChoiceCount == 0 && !leading) TurnDecisionSource.System else TurnDecisionSource.LocalAi
         var reason = if (legalChoiceCount == 1) TurnDecisionReason.OnlyLegalMove else TurnDecisionReason.NormalChoice
         val choice = choices.firstOrNull() ?: AiMoveChoice(pass = true)
         if (choice.pass) reason = TurnDecisionReason.CannotBeat
 
-        val turnNo = nextTurnNo
         if (choice.pass) {
             if (pass(player)) {
                 turnRecords += TurnRecord(turnNo, player, source, reason, GameAction("pass"), emptyList(), null, true)
@@ -533,7 +603,7 @@ class GameState {
     }
 
     private fun applyLlmFallback(actor: PlayerId, requested: GameAction, trace: TurnDecisionTrace, message: String): Boolean {
-        val choice = ai.chooseMove(players[actor.index()].hand, makeAiContext(actor))
+        val choice = chooseLocalMove(actor)
         val turnNo = nextTurnNo
         if (choice.pass) {
             if (!pass(actor)) return false
@@ -546,7 +616,16 @@ class GameState {
         return true
     }
 
+    private fun cancelLocalAi() {
+        localAiGeneration++
+        localAiPending = false
+        localAiWorker?.interrupt()
+        localAiWorker = null
+        localAiResult.set(null)
+    }
+
     private fun playCards(player: PlayerId, cards: List<Card>, pattern: HandPattern) {
+        if (currentPlayerLeads()) trickLeader = player
         removeCardsFromHand(player, cards)
         players[player.index()].hasPlayedCards = true
         playedCards += cards
@@ -580,7 +659,7 @@ class GameState {
             return false
         }
         passCount++
-        lastPattern?.let { passObservations[player.index()] = PassObservation(it, players[player.index()].hand.size) }
+        lastPattern?.let { recordPassObservation(player, it) }
         toast = "${playerDisplayName(player, players[0].name)} 不要"
         events += GameEvent(GameEventType.Passed, player, toast)
         if (player != PlayerId.Player) maybeTalk(player, "先不要，你们继续。")
@@ -588,6 +667,7 @@ class GameState {
             currentPlayer = lastMovePlayer
             lastPattern = null
             lastCards = emptyList()
+            trickLeader = currentPlayer
             passCount = 0
             toast = "${playerDisplayName(currentPlayer, players[0].name)} 重新领出"
             return true
@@ -616,6 +696,31 @@ class GameState {
     private fun removeCardsFromHand(player: PlayerId, cards: List<Card>) {
         val hand = players[player.index()].hand
         cards.forEach { card -> hand.remove(card) }
+    }
+
+    private fun chooseLocalMove(player: PlayerId): AiMoveChoice =
+        when (localAiKinds[player.index()]) {
+            LocalAiKind.Basic -> basicAi.chooseMove(players[player.index()].hand, makeAiContext(player))
+            LocalAiKind.Strong -> strongAi.chooseMove(players[player.index()].hand, makeAiContext(player))
+        }
+
+    private fun recommendLocalMoves(kind: LocalAiKind, hand: List<Card>, context: AiContext, limit: Int): List<AiMoveChoice> =
+        when (kind) {
+            LocalAiKind.Basic -> BasicAiStrategy().recommendMoves(hand, context, limit)
+            LocalAiKind.Strong -> StrongAiStrategy().recommendMoves(hand, context, limit)
+        }
+
+    private fun recordPassObservation(player: PlayerId, pattern: HandPattern) {
+        val index = player.index()
+        val observation = PassObservation(pattern, players[index].hand.size)
+        passHistory[index] += observation
+        val existing = passObservations[index]
+        if (existing != null && existing.pattern.type == PatternType.Single && pattern.type == PatternType.Single) {
+            if (pattern.mainRank.value < existing.pattern.mainRank.value) passObservations[index] = observation
+            return
+        }
+        if (existing != null && existing.pattern.type == PatternType.Single && pattern.type != PatternType.Single) return
+        passObservations[index] = observation
     }
 
     private fun advanceTurn() {

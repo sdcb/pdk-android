@@ -31,8 +31,8 @@ class GameStateExternalAiTest {
         )
         state.setExternalAiController(controller)
 
-        state.update(1f)
-        state.update(0.1f)
+        state.advanceUntil { controller.hasPending() }
+        state.advanceUntil { turnRecords.isNotEmpty() }
 
         assertEquals(listOf(Rank.Six), state.lastCards.map { it.rank })
         assertEquals(TurnDecisionSource.LlmAi, state.turnRecords.single().source)

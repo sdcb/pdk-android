@@ -23,3 +23,18 @@ fun followContext(previous: HandPattern, handSize: Int): AiContext =
         minOpponentRemainingCards = 10,
         remainingCards = listOf(10, handSize, 10),
     )
+
+fun GameState.advanceUntil(
+    maxFrames: Int = 500,
+    dtSeconds: Float = 1f,
+    clearEventsEachFrame: Boolean = false,
+    condition: GameState.() -> Boolean,
+) {
+    repeat(maxFrames) {
+        if (condition()) return
+        update(dtSeconds)
+        if (clearEventsEachFrame) clearEvents()
+        Thread.sleep(1)
+    }
+    if (!condition()) error("condition was not reached within $maxFrames frames")
+}

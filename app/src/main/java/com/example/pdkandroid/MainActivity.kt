@@ -94,6 +94,7 @@ import com.example.pdk.core.RoundRecord
 import com.example.pdk.core.Suit
 import com.example.pdk.core.index
 import com.example.pdk.core.nextCounterClockwise
+import com.example.pdk.core.normalizeLocalAiName
 import com.example.pdk.core.playerDisplayName
 import kotlinx.coroutines.delay
 import org.json.JSONArray
@@ -399,6 +400,8 @@ private fun PdkCanvasApp(initialScene: String, mock: String) {
     }
 
     LaunchedEffect(ai1ProviderName, ai2ProviderName, providers.toList()) {
+        game.setLocalAiKind(PlayerId.Ai1, ai1ProviderName)
+        game.setLocalAiKind(PlayerId.Ai2, ai2ProviderName)
         val providerMap = buildMap {
             providers.firstOrNull { it.name == ai1ProviderName }?.let { put(PlayerId.Ai1, it.toSettings()) }
             providers.firstOrNull { it.name == ai2ProviderName }?.let { put(PlayerId.Ai2, it.toSettings()) }
@@ -576,8 +579,8 @@ private fun PdkCanvasApp(initialScene: String, mock: String) {
                     if (selectedProviderIndex in providers.indices) {
                         val removedName = providers[selectedProviderIndex].name
                         providers.removeAt(selectedProviderIndex)
-                        if (ai1ProviderName == removedName) ai1ProviderName = "local"
-                        if (ai2ProviderName == removedName) ai2ProviderName = "local"
+                        if (ai1ProviderName == removedName) ai1ProviderName = "basic"
+                        if (ai2ProviderName == removedName) ai2ProviderName = "basic"
                         selectedProviderIndex = selectedProviderIndex.coerceAtMost(providers.lastIndex)
                         soundPlayer.play(SoundId.ButtonClick)
                     }
@@ -673,8 +676,8 @@ private data class AiProviderDraft(
 private data class AppSettingsDraft(
     val playerName: String = "李姐",
     val masterVolume: Float = 0.8f,
-    val ai1: String = "local",
-    val ai2: String = "local",
+    val ai1: String = "basic",
+    val ai2: String = "basic",
     val providers: List<AiProviderDraft> = emptyList(),
 )
 
@@ -721,8 +724,8 @@ private class AndroidPersistence(private val context: Context) {
         return AppSettingsDraft(
             playerName = root.optString("playerName", "李姐").ifBlank { "李姐" },
             masterVolume = root.optDouble("masterVolume", 0.8).toFloat().coerceIn(0f, 1f),
-            ai1 = root.optString("ai1", "local").ifBlank { "local" },
-            ai2 = root.optString("ai2", "local").ifBlank { "local" },
+            ai1 = normalizeLocalAiName(root.optString("ai1", "basic")),
+            ai2 = normalizeLocalAiName(root.optString("ai2", "basic")),
             providers = providers,
         )
     }
@@ -733,8 +736,8 @@ private class AndroidPersistence(private val context: Context) {
             .put("masterVolume", settings.masterVolume.toDouble())
             .put("windowWidth", 1280)
             .put("windowHeight", 720)
-            .put("ai1", settings.ai1)
-            .put("ai2", settings.ai2)
+            .put("ai1", normalizeLocalAiName(settings.ai1))
+            .put("ai2", normalizeLocalAiName(settings.ai2))
 
         if (settings.providers.isNotEmpty()) {
             val providers = JSONObject()
@@ -1077,7 +1080,7 @@ private fun SettingsNativeScreen(
     onCancel: () -> Unit,
 ) {
     val selectedProvider = providers.getOrNull(selectedProviderIndex)
-    val providerOptions = listOf("local") + providers.map { it.name }
+    val providerOptions = listOf("basic", "strong") + providers.map { it.name }
     Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFFF1EBDD)) {
         Column(Modifier.fillMaxSize().padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -1281,8 +1284,13 @@ private fun AiRouteRow(label: String, selected: String, options: List<String>, o
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(label, color = Color(0xFF1D1F1E), fontSize = 13.sp, modifier = Modifier.width(34.dp))
         options.forEach { option ->
-            val display = if (option == "local") "local" else option
-            if (option == selected) {
+            val normalizedSelected = normalizeLocalAiName(selected)
+            val display = when (option) {
+                "basic" -> "基础"
+                "strong" -> "强AI"
+                else -> option
+            }
+            if (option == normalizedSelected || option == selected) {
                 Button(onClick = { onChange(option) }, modifier = Modifier.height(30.dp)) { Text(display, fontSize = 12.sp) }
             } else {
                 OutlinedButton(onClick = { onChange(option) }, modifier = Modifier.height(30.dp)) { Text(display, fontSize = 12.sp) }
